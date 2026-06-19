@@ -45,6 +45,14 @@ MAX_SLOTS = 5
 MIN_SLOTS = 1
 MAX_HISTORY = 10
 
+# 内置固定槽位名：这些槽位不显示删除按钮，防止误删。
+FIXED_SLOT_NAMES = {"code", "elf", "map"}
+
+
+def is_fixed_slot(slot: Slot) -> bool:
+    """内置固定槽位（code/elf/map）不可删除。改名后即脱离固定保护。"""
+    return slot.name in FIXED_SLOT_NAMES
+
 # 格式：(显示名, 格式化函数标记)。顺序即下拉顺序。
 FORMATS = ["绝对路径", "正斜杠", "@前缀", "加引号", "仅文件名", "仅目录"]
 SEPARATORS = ["换行", "空格", "逗号", "空行"]
@@ -214,16 +222,18 @@ class SlotRow(QWidget):
         add_btn.setToolTip("把当前路径加入下方输出框")
         add_btn.clicked.connect(self._on_add)
 
-        remove_btn = QPushButton("✕")
-        remove_btn.setFixedWidth(28)
-        remove_btn.setToolTip("删除该槽位")
-        remove_btn.clicked.connect(lambda: self.win.remove_slot(self))
-
         layout.addWidget(self.name_edit)
         layout.addWidget(self.path_combo, stretch=1)
         layout.addWidget(browse_btn)
         layout.addWidget(add_btn)
-        layout.addWidget(remove_btn)
+
+        # 仅非固定槽位（用户自添加的）显示删除按钮，防止误删 code/elf/map。
+        if not is_fixed_slot(slot):
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedWidth(28)
+            remove_btn.setToolTip("删除该槽位")
+            remove_btn.clicked.connect(lambda: self.win.remove_slot(self))
+            layout.addWidget(remove_btn)
 
     # ── 重命名 ──
     def _on_name_double_click(self, _event):
@@ -245,20 +255,19 @@ class SlotRow(QWidget):
 
     # ── Browse ──
     def _on_browse(self):
-        choice = QMessageBox.question(
-            self, "浏览类型",
-            "是 = 选择文件\n否 = 选择文件夹\n（取消则放弃）",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-        )
-        if choice == QMessageBox.StandardButton.Cancel:
+        # 用非原生 QFileDialog：一次操作即可选中文件或文件夹（双击进入目录，
+        # 选中目录后点"选择"即返回该目录路径）。避免"选文件还是文件夹"的二次确认。
+        dlg = QFileDialog(self, "选择文件或文件夹")
+        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        # ExistingFile 允许选中已存在的文件；非原生模式下也能选中目录（点"选择"返回目录）。
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+        dlg.setOption(QFileDialog.Option.ShowDirsOnly, False)
+        if not dlg.exec():
             return
-        if choice == QMessageBox.StandardButton.Yes:
-            path, _ = QFileDialog.getOpenFileName(self, "选择文件")
-        else:
-            path = QFileDialog.getExistingDirectory(self, "选择文件夹")
-        if not path:
+        files = dlg.selectedFiles()
+        if not files:
             return
-        path = resolve_shortcut(path)
+        path = resolve_shortcut(files[0])
         self.path_combo.setEditText(path)
 
     # ── Add ──
@@ -270,7 +279,8 @@ class SlotRow(QWidget):
         if not path:
             QMessageBox.information(self, APP_NAME, "请先选择或输入一个路径。")
             return
-        self.win.add_path_to_output(path)
+        # 以槽位名作为标签前缀，输出形如 'code: <path>'。
+        self.win.add_path_to_output(path, label=self.slot.name)
         self.push_history(path)
 
     def push_history(self, path: str) -> None:
@@ -349,7 +359,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: Settings):
         super().__init__()
         self.settings = settings
-        self.raw_entries: List[str] = []      # 通过 Add/拖拽加入的原始路径
+        self.raw_entries: list = []           # 元素为 (label:str, raw_path:str)
         self.user_edited = False              # 用户是否手动编辑过输出框
         self.suppress_change = False          # 重绘输出框期间抑制编辑判定
         self.slot_rows: List[SlotRow] = []
@@ -438,12 +448,15 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.copy_btn)
         root.addLayout(bottom)
 
-        # 应用置顶
-        self._apply_on_top()
-
         # 构建槽位行
         self._rebuild_slot_rows()
         self._refresh_add_slot_button()
+        # 注：置顶在首次 showEvent 时应用（winId 此时才可用）。
+
+    def showEvent(self, event):  # type: ignore[override]
+        super().showEvent(event)
+        # 首次显示后应用置顶状态（winId 此时已建立）。
+        self._apply_on_top()
 
     # ───────── 槽位管理 ─────────
     def _rebuild_slot_rows(self):
@@ -488,8 +501,13 @@ class MainWindow(QMainWindow):
             self.add_slot_btn.setToolTip("新增一个槽位（最多 5 个）")
 
     # ───────── 输出框：拼接 / 重绘 ─────────
-    def add_path_to_output(self, raw_path: str):
-        self.raw_entries.append(raw_path)
+    def add_path_to_output(self, raw_path: str, label: str = ""):
+        """把一条原始路径加入输出。label 非空时，输出行前缀 'label: '。
+
+        label 一般为槽位名（如 code），让输出清晰归属，例如：
+            code: D:/git/pathcopy/build.bat
+        """
+        self.raw_entries.append((label, raw_path))
         self._render_output_from_raw()
         self.output.moveCursor(Qt.MoveOperation.End)
 
@@ -499,10 +517,13 @@ class MainWindow(QMainWindow):
             self.output.setPlainText("")
             self.suppress_change = False
             return
-        lines = [
-            format_path(p, self.settings.path_format, self.settings.auto_quote_spaces)
-            for p in self.raw_entries
-        ]
+        lines = []
+        for label, p in self.raw_entries:
+            formatted = format_path(p, self.settings.path_format, self.settings.auto_quote_spaces)
+            if label:
+                lines.append(f"{label}: {formatted}")
+            else:
+                lines.append(formatted)
         self.suppress_change = True
         self.output.setPlainText(separator_string(self.settings.separator).join(lines))
         self.suppress_change = False
@@ -574,11 +595,26 @@ class MainWindow(QMainWindow):
         self._apply_on_top()
 
     def _apply_on_top(self):
-        if self.settings.always_on_top:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        else:
-            self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
-        self.show()  # 切换 WindowFlags 后需要重新 show
+        # 切换"始终置顶"。注意：不要用 setWindowFlags()——它会重建窗口，
+        # 在某些情况下导致标题栏的关闭/最小化按钮失效变灰。
+        # 改用 Win32 SetWindowPos 直接改 HWND_TOPMOST，不重建 Qt 窗口，安全可靠。
+        if not self.isVisible():
+            return
+        try:
+            import ctypes
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            hwnd_insert_after = HWND_TOPMOST if self.settings.always_on_top else HWND_NOTOPMOST
+            ctypes.windll.user32.SetWindowPos(
+                int(self.winId()), hwnd_insert_after, 0, 0, 0, 0, flags
+            )
+        except Exception:
+            # 非 Windows 或调用失败时回退（仅初始化阶段用，运行时已确保可见）
+            pass
 
     # ───────── 关闭持久化 ─────────
     def closeEvent(self, event):
