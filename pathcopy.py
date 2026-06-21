@@ -203,6 +203,39 @@ def separator_string(sep: int) -> str:
     }[sep]
 
 
+# ───────────────────── 文件/文件夹选择对话框 ─────────────────────
+
+class FileOrDirDialog(QFileDialog):
+    """非原生 QFileDialog：文件与文件夹都能选中。
+
+    ExistingFile 模式下，点"选择"只能返回文件，选中目录时会被忽略。
+    这里重写 accept()：当高亮项是目录时，直接把该目录作为结果返回；
+    若没有任何条目被选中，则返回当前所在目录。这样一次操作即可选文件或文件夹。
+    """
+
+    def __init__(self, parent=None, caption: str = ""):
+        super().__init__(parent, caption or "选择文件或文件夹")
+        self.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        self.setFileMode(QFileDialog.FileMode.ExistingFile)
+        self.setOption(QFileDialog.Option.ShowDirsOnly, False)
+        self._result_path: str = ""
+
+    def accept(self):  # type: ignore[override]
+        files = self.selectedFiles()
+        if files:
+            target = files[0]
+        else:
+            target = self.directory().absolutePath()
+        if target and os.path.exists(target):
+            self._result_path = target
+            self.setSelection([target])
+            return super().accept()
+        # 路径不存在：交回默认行为（通常表现为不关闭，由用户重新选）
+
+    def selectedPath(self) -> str:
+        return self._result_path
+
+
 # ───────────────────── 槽位行组件 ─────────────────────
 
 class SlotRow(QWidget):
@@ -273,19 +306,18 @@ class SlotRow(QWidget):
 
     # ── Browse ──
     def _on_browse(self):
-        # 用非原生 QFileDialog：一次操作即可选中文件或文件夹（双击进入目录，
-        # 选中目录后点"选择"即返回该目录路径）。避免"选文件还是文件夹"的二次确认。
-        dlg = QFileDialog(self, "选择文件或文件夹")
-        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        # ExistingFile 允许选中已存在的文件；非原生模式下也能选中目录（点"选择"返回目录）。
-        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
-        dlg.setOption(QFileDialog.Option.ShowDirsOnly, False)
+        # 非原生 QFileDialog，文件/文件夹均可选：
+        #  - 选中文件：返回该文件
+        #  - 在目录中双击空白/选中目录后点"选择"：返回该目录
+        #  - 未选中任何条目就点"选择"：返回当前所在目录
+        # 这样一次操作即可完成，无需弹"选文件还是文件夹"的二次确认。
+        dlg = FileOrDirDialog(self, "选择文件或文件夹")
         if not dlg.exec():
             return
-        files = dlg.selectedFiles()
-        if not files:
+        path = dlg.selectedPath() or (dlg.selectedFiles()[0] if dlg.selectedFiles() else "")
+        if not path:
             return
-        path = resolve_shortcut(files[0])
+        path = resolve_shortcut(path)
         self.path_combo.setEditText(path)
 
     # ── Add ──
@@ -402,9 +434,9 @@ class MainWindow(QMainWindow):
         self.on_top_check.setChecked(settings.always_on_top)
         self.on_top_check.toggled.connect(self._on_top_toggled)
         top.addWidget(self.on_top_check)
-        clear_hist_btn = QPushButton("清除全部历史")
-        clear_hist_btn.clicked.connect(self._on_clear_all_history)
-        top.addWidget(clear_hist_btn)
+        reset_btn = QPushButton("Reset All")
+        reset_btn.clicked.connect(self._on_reset_all)
+        top.addWidget(reset_btn)
         root.addLayout(top)
 
         # ── 槽位区 ──
@@ -600,16 +632,19 @@ class MainWindow(QMainWindow):
         self.copy_btn.setStyleSheet("font-weight: 600; background-color: #90EE90;")
         QTimer_flash(self.copy_btn, orig)
 
-    def _on_clear_all_history(self):
+    def _on_reset_all(self):
+        # Reset All：把槽位恢复成默认的三个固定槽（code/elf/map，无历史），
+        # 同时清空输出框。用户新增/重命名的槽位与所有历史都会一并清除。
         if QMessageBox.question(
-            self, "确认", "确定清空所有槽位的历史记录吗？（不会影响槽位本身）",
+            self, "确认", "将清空所有历史并恢复为默认槽位（code / elf / map）。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
             return
-        for s in self.settings.slots:
-            s.history.clear()
-        for row in self.slot_rows:
-            row.path_combo.clear()
+        self.settings.slots = Settings.default().slots
+        self._rebuild_slot_rows()
+        self._refresh_add_slot_button()
+        self.raw_entries.clear()
+        self._render_output_from_raw()
 
     def _on_top_toggled(self, checked: bool):
         self.settings.always_on_top = checked
