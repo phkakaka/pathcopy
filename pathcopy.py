@@ -45,13 +45,14 @@ MAX_SLOTS = 5
 MIN_SLOTS = 1
 MAX_HISTORY = 10
 
-# 内置固定槽位名：这些槽位不显示删除按钮，防止误删。
+# 内置固定槽位名：首次配置或旧配置迁移时，名字在此集合中的槽位视为固定。
 FIXED_SLOT_NAMES = {"code", "elf", "map"}
 
 
 def is_fixed_slot(slot: Slot) -> bool:
-    """内置固定槽位（code/elf/map）不可删除。改名后即脱离固定保护。"""
-    return slot.name in FIXED_SLOT_NAMES
+    """固定槽位不可删除。判定依据是 slot.fixed 标志位（持久化），
+    而非名字——这样即使重命名 code，它仍然固定。"""
+    return bool(slot.fixed)
 
 # 格式：(显示名, 格式化函数标记)。顺序即下拉顺序。
 FORMATS = ["绝对路径", "正斜杠", "@前缀", "加引号", "仅文件名", "仅目录"]
@@ -74,9 +75,14 @@ SEP_BLANKLINE = 3
 
 @dataclass
 class Slot:
-    """一个路径槽位：名称 + 最近使用历史（最近在前，最多 MAX_HISTORY 条）。"""
+    """一个路径槽位：名称 + 最近使用历史（最近在前，最多 MAX_HISTORY 条）。
+
+    fixed=True 表示内置固定槽位（默认 code/elf/map），不显示删除按钮、
+    防止误删，且即使重命名也保持固定。用户新增的槽位 fixed=False。
+    """
     name: str = "slot"
     history: List[str] = field(default_factory=list)
+    fixed: bool = False
 
 
 @dataclass
@@ -91,7 +97,7 @@ class Settings:
 
     @staticmethod
     def default() -> "Settings":
-        return Settings(slots=[Slot("code"), Slot("elf"), Slot("map")])
+        return Settings(slots=[Slot("code", fixed=True), Slot("elf", fixed=True), Slot("map", fixed=True)])
 
     def normalize(self) -> None:
         """保证数据合法：槽位数/历史条数/名称。"""
@@ -105,12 +111,24 @@ class Settings:
             s.history = s.history[:MAX_HISTORY]
 
 
+def _slot_from_dict(d: dict) -> Slot:
+    """从配置 dict 构造 Slot。兼容旧配置（无 fixed 字段）：
+    缺失时按名字推断——名字在 FIXED_SLOT_NAMES 中即视为固定。"""
+    name = d.get("name", "slot")
+    history = list(d.get("history", []))
+    if "fixed" in d:
+        fixed = bool(d["fixed"])
+    else:
+        fixed = name in FIXED_SLOT_NAMES
+    return Slot(name=name, history=history, fixed=fixed)
+
+
 def load_settings() -> Settings:
     try:
         if CONFIG_PATH.exists():
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             s = Settings(
-                slots=[Slot(**slot) for slot in data.get("slots", [])],
+                slots=[_slot_from_dict(slot) for slot in data.get("slots", [])],
                 path_format=int(data.get("path_format", FMT_ABSOLUTE)),
                 separator=int(data.get("separator", SEP_NEWLINE)),
                 auto_quote_spaces=bool(data.get("auto_quote_spaces", True)),
@@ -130,7 +148,7 @@ def save_settings(s: Settings) -> None:
         s.normalize()
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         data = {
-            "slots": [{"name": sl.name, "history": sl.history} for sl in s.slots],
+            "slots": [{"name": sl.name, "history": sl.history, "fixed": sl.fixed} for sl in s.slots],
             "path_format": s.path_format,
             "separator": s.separator,
             "auto_quote_spaces": s.auto_quote_spaces,
@@ -485,6 +503,9 @@ class MainWindow(QMainWindow):
         self._refresh_add_slot_button()
 
     def remove_slot(self, row: SlotRow):
+        if is_fixed_slot(row.slot):
+            # 固定槽位不可删除（删除按钮本就不显示，此处为防御性保护）。
+            return
         if len(self.settings.slots) <= MIN_SLOTS:
             QMessageBox.information(self, APP_NAME, "至少需要保留 1 个槽位。")
             return
