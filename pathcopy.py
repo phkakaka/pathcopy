@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Qt, QMimeData
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeyEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeyEvent, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -116,6 +116,7 @@ class Settings:
     always_on_top: bool = False
     window_width: int = 660
     window_height: int = 580
+    last_output: str = ""  # 上次关闭时输出框的完整文本，下次启动原样还原
 
     @staticmethod
     def default() -> "Settings":
@@ -157,6 +158,7 @@ def load_settings() -> Settings:
                 always_on_top=bool(data.get("always_on_top", False)),
                 window_width=int(data.get("window_width", 660)),
                 window_height=int(data.get("window_height", 580)),
+                last_output=str(data.get("last_output", "")),
             )
             s.normalize()
             return s
@@ -177,6 +179,7 @@ def save_settings(s: Settings) -> None:
             "always_on_top": s.always_on_top,
             "window_width": s.window_width,
             "window_height": s.window_height,
+            "last_output": s.last_output,
         }
         CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
@@ -346,6 +349,9 @@ class SlotRow(QWidget):
             return
         path = resolve_shortcut(path)
         self.path_combo.setEditText(path)
+        # 浏览确认的路径也计入历史，否则只有点 Add 才会记录，
+        # 用户关掉程序后这些路径就丢了。
+        self.push_history(path)
 
     # ── Add ──
     def current_path(self) -> str:
@@ -532,6 +538,16 @@ class MainWindow(QMainWindow):
         # 构建槽位行
         self._rebuild_slot_rows()
         self._refresh_add_slot_button()
+        # 还原上次关闭时的输出文本（原样回填，包括用户手动编辑过的内容）。
+        # 用 suppress_change 包裹，避免触发 user_edited 标记。
+        # 由于这些文本不来自 raw_entries，把它视为用户编辑：这样切换
+        # 格式/分隔符时不会被 _reflow_output 清空（raw_entries 为空）。
+        if settings.last_output:
+            self.suppress_change = True
+            self.output.setPlainText(settings.last_output)
+            self.suppress_change = False
+            self.output.moveCursor(QTextCursor.MoveOperation.End)
+            self.user_edited = True
         # 注：置顶在首次 showEvent 时应用（winId 此时才可用）。
 
     def showEvent(self, event):  # type: ignore[override]
@@ -593,7 +609,7 @@ class MainWindow(QMainWindow):
         """
         self.raw_entries.append((label, raw_path))
         self._render_output_from_raw()
-        self.output.moveCursor(Qt.MoveOperation.End)
+        self.output.moveCursor(QTextCursor.MoveOperation.End)
 
     def _render_output_from_raw(self):
         if not self.raw_entries:
@@ -707,6 +723,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.settings.window_width = self.width()
         self.settings.window_height = self.height()
+        # 捕获输出框当前完整文本，下次启动原样还原。
+        self.settings.last_output = self.output.toPlainText()
         save_settings(self.settings)
         super().closeEvent(event)
 
