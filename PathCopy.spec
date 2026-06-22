@@ -3,12 +3,16 @@
 from pathlib import Path
 
 project_root = Path(SPECPATH).resolve()
+icon_file = str(project_root / "assets" / "pathcopy.ico")
+assets_dir = str(project_root / "assets")
 
 a = Analysis(
     ["pathcopy.py"],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    # 把 assets 目录打入 exe，运行时由 sys._MEIPASS 解出；
+    # 目标路径 "assets" 与 pathcopy.py 中 _resource_path("assets/pathcopy.ico") 对应。
+    datas=[(assets_dir, "assets")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -26,7 +30,7 @@ exe = EXE(
     a.datas,
     [],
     name="PathCopy",
-    icon=None,                 # 暂无图标；如需可放 assets/pathcopy.ico 后改为 str(project_root/"assets"/"pathcopy.ico")
+    icon=icon_file,            # 嵌入 exe 资源（资源管理器/任务栏显示此图标）
     version=str(project_root / "version_info.txt"),
     debug=False,
     bootloader_ignore_signals=False,

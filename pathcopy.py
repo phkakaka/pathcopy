@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Qt, QMimeData
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QKeyEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -40,6 +41,27 @@ APP_VERSION = "1.0.0"
 
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "settings.json"
+
+
+def _resource_path(relative: str) -> Path:
+    """解析打包/开发环境下的资源路径。
+
+    PyInstaller onedir/onefile 运行时会把 --add-data 的资源解到
+    sys._MEIPASS（临时目录）；开发环境则用脚本同级的源码目录。
+    二者都查一遍，命中即返回；都没有就退回源码相对路径（交给调用方容错）。
+    """
+    candidates = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(Path(base) / relative)
+    candidates.append(Path(__file__).resolve().parent / relative)
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[-1]
+
+
+ICON_PATH = _resource_path(os.path.join("assets", "pathcopy.ico"))
 
 MAX_SLOTS = 5
 MIN_SLOTS = 1
@@ -228,8 +250,13 @@ class FileOrDirDialog(QFileDialog):
             target = self.directory().absolutePath()
         if target and os.path.exists(target):
             self._result_path = target
-            self.setSelection([target])
-            return super().accept()
+            # 注意：不能调用 super().accept()（即 QFileDialog.accept）。
+            # 在 ExistingFile + 非原生对话框下，若选中项是目录，Qt 的
+            # accept() 会把它当作"进入该目录"（setDirectory 后直接 return，
+            # 不关闭对话框）——这正是"选文件夹点 Open 没反应"的根因。
+            # 改为调用祖类 QDialog.accept()，跳过 QFileDialog 的目录进入逻辑，
+            # 强制关闭对话框并返回 Accepted。
+            return QDialog.accept(self)
         # 路径不存在：交回默认行为（通常表现为不关闭，由用户重新选）
 
     def selectedPath(self) -> str:
@@ -417,6 +444,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(settings.window_width, settings.window_height)
         self.setMinimumSize(560, 480)
+
+        # 窗口/任务栏图标（开发态从源码 assets/ 取，打包后从 _MEIPASS 取）。
+        if ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -695,6 +726,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
+    # 应用级图标：确保 Windows 任务栏按 PathCopy 分组，而非用默认 Python 图标。
+    if ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
 
     # 单实例：第二个实例直接退出
     single = None
